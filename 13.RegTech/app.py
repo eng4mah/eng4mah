@@ -327,6 +327,29 @@ def build_prompt(task_description: str, rules: str, context: str, question: Opti
 
 # --- Streamlit Main Application ---
 def main():
+        # --- TEMPORARY DEBUGGING CODE ---
+    st.subheader("🕵️‍♂️ Directory Debug Information")
+    try:
+        # Get the current location of the script
+        cwd = os.getcwd()
+        st.write(f"**Current Working Directory:** `{cwd}`")
+
+        # List all files/folders in the root of the repository
+        st.write("**Files in Root Directory:**")
+        st.code('\n'.join(os.listdir(cwd)))
+
+        # Specifically check for the 'legal_docs' folder
+        legal_docs_path = os.path.join(cwd, "legal_docs")
+        if os.path.exists(legal_docs_path):
+            st.write("**Files in `./legal_docs`:**")
+            st.code('\n'.join(os.listdir(legal_docs_path)))
+        else:
+            st.error("The `./legal_docs` folder was NOT FOUND at the expected path.")
+            
+    except Exception as e:
+        st.error(f"An error occurred during debugging: {e}")
+    st.markdown("---") # Separator
+    # --- END OF DEBUGGING CODE ---
     st.set_page_config(page_title="RegTech Assistance", page_icon="⚖️", layout="centered")
     if not LIBRARIES_AVAILABLE:
         st.stop()
