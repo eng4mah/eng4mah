@@ -1,0 +1,7 @@
+streamlit
+langchain-core
+pypdf
+docx
+pillow
+pytesseract
+requests
