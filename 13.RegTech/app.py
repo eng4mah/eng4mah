@@ -47,6 +47,17 @@ DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
 # --- CSS for layout, Arabic, and new styling ---
 st.markdown("""
 <style>
+/* Force Light Theme */
+body, .stApp, .main {
+    background-color: #FFFFFF !important;
+    color: #262730 !important; /* Streamlit's default dark text */
+}
+
+h1, h2, h3, h4, h5, h6 {
+     color: #262730 !important;
+}
+
+/* RTL Styles */
 html, body, [class*="st-"] {
     direction: rtl !important;
     text-align: right !important;
@@ -115,7 +126,8 @@ def read_file_content(file_path: str) -> Tuple[str, str]:
 def get_document_names_from_folder(folder_path: str) -> List[str]:
     """Gets a list of supported document names from a folder."""
     if not os.path.isdir(folder_path):
-        st.error(f"Folder not found at path: {folder_path}") # Added for better debugging
+        # This error is useful for initial setup, but can be removed later.
+        # st.error(f"Folder not found at path: {folder_path}")
         return []
     supported_files = []
     for file_name in os.listdir(folder_path):
@@ -335,34 +347,9 @@ def build_prompt(task_description: str, rules: str, context: str, question: Opti
 
 # --- Streamlit Main Application ---
 def main():
+    # Page config must be the first Streamlit command.
     st.set_page_config(page_title="RegTech Assistance", page_icon="⚖️", layout="centered")
     
-    # --- ENHANCED DEBUGGING CODE ---
-    st.subheader("🕵️‍♂️ File Reading Debug")
-    st.write(f"**Checking for folder at:** `{FOLDER_PATH}`") # Debug path
-    if os.path.exists(FOLDER_PATH) and os.path.isdir(FOLDER_PATH):
-        files = os.listdir(FOLDER_PATH)
-        if not files:
-            st.warning("The `legal_docs` folder exists, but it is empty.")
-        else:
-            st.success(f"Found {len(files)} files in `legal_docs` folder.")
-            first_file = files[0]
-            st.info(f"Attempting to read the first file: `{first_file}`")
-            try:
-                # We call your own function to see if it works
-                file_name, text_content = read_file_content(os.path.join(FOLDER_PATH, first_file))
-                st.success(f"Successfully read `{file_name}`!")
-                st.text("First 500 chars:")
-                st.code(text_content[:500])
-            except Exception as e:
-                # THIS WILL SHOW THE EXACT ERROR
-                st.error(f"FAILED TO READ FILE. The error is:")
-                st.exception(e)
-    else:
-        st.error("The `legal_docs` folder was NOT FOUND at the specified path.")
-    st.markdown("---")
-    # --- END OF DEBUGGING CODE ---
-
     if not LIBRARIES_AVAILABLE:
         st.stop()
     if not API_KEY or "sk-" not in API_KEY:
@@ -391,8 +378,10 @@ def main():
         # --- Initial Loading and Auto-Summarization ---
         if not st.session_state.docs_loaded_first_time:
             with st.spinner("جاري تحميل قائمة الوثائق والقواعد..."):
-                if not os.path.exists(FOLDER_PATH): os.makedirs(FOLDER_PATH)
-                if not os.path.exists(SUMMARY_FOLDER_PATH): os.makedirs(SUMMARY_FOLDER_PATH)
+                # The logic to create folders will fail on read-only filesystems,
+                # but it's harmless if the folders already exist in the repo.
+                if not os.path.exists(FOLDER_PATH): os.makedirs(FOLDER_PATH, exist_ok=True)
+                if not os.path.exists(SUMMARY_FOLDER_PATH): os.makedirs(SUMMARY_FOLDER_PATH, exist_ok=True)
 
                 st.session_state.doc_names = get_document_names_from_folder(FOLDER_PATH)
                 # UPDATED: Load rules from the correct full path
@@ -418,12 +407,16 @@ def main():
                 # This part will still fail on Streamlit Cloud due to read-only filesystem
                 # It's kept as per user request not to remove features
                 file_path = os.path.join(FOLDER_PATH, uploaded_file.name)
-                with open(file_path, "wb") as f:
-                    f.write(uploaded_file.getbuffer())
-                st.toast(f"تم تحميل الملف '{uploaded_file.name}' بنجاح!", icon="✅")
+                try:
+                    with open(file_path, "wb") as f:
+                        f.write(uploaded_file.getbuffer())
+                    st.toast(f"تم تحميل الملف '{uploaded_file.name}' بنجاح!", icon="✅")
 
-                if USE_AUTO_SUMMARIZATION:
-                    generate_and_save_summary(uploaded_file.name, FOLDER_PATH, SUMMARY_FOLDER_PATH, API_KEY)
+                    if USE_AUTO_SUMMARIZATION:
+                        generate_and_save_summary(uploaded_file.name, FOLDER_PATH, SUMMARY_FOLDER_PATH, API_KEY)
+                except Exception as e:
+                    st.error(f"فشل تحميل الملف. الخادم يعمل في وضع القراءة فقط: {e}")
+
 
                 st.session_state.docs_loaded_first_time = False
                 st.session_state.action = None
