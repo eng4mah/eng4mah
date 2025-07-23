@@ -1,7 +1,7 @@
 streamlit
+requests
 langchain-core
 pypdf
-docx
-pillow
+python-docx
+Pillow
 pytesseract
-requests
