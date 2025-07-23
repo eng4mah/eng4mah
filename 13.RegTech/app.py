@@ -20,11 +20,19 @@ except ImportError as e:
     st.error(f"مكتبة ناقصة: {e}")
     LIBRARIES_AVAILABLE = False
 
-# --- Configuration ---
-FOLDER_PATH = "./legal_docs"
-SUMMARY_FOLDER_PATH = "./summary" # NEW: Folder for summaries
-API_KEY = "sk-cfbf269ccbbc4e94aa69df94c2a25739" # Replace with your actual key or use st.secrets
+# --- Configuration (FIXED PATHS) ---
+# Get the absolute path of the directory containing the script (e.g., /mount/src/eng4mah/13.RegTech.streamlits)
+script_directory = os.path.dirname(os.path.abspath(__file__))
+# Go up one directory to the project's root on Streamlit Cloud (e.g., /mount/src/eng4mah)
+project_root = os.path.dirname(script_directory)
+# Build the correct, absolute paths to your folders from the project root
+FOLDER_PATH = os.path.join(project_root, "13.RegTech", "legal_docs")
+SUMMARY_FOLDER_PATH = os.path.join(project_root, "13.RegTech", "summary")
 RULES_FILE_NAME = "RULES.txt"
+# Explicitly define the full path for the rules file
+RULES_FILE_PATH = os.path.join(project_root, "13.RegTech", RULES_FILE_NAME)
+
+API_KEY = "sk-cfbf269ccbbc4e94aa69df94c2a25739" # Replace with your actual key or use st.secrets
 
 # --- New Feature Flags ---
 USE_AUTO_SUMMARIZATION = True # Master switch for the new summary feature
@@ -107,6 +115,7 @@ def read_file_content(file_path: str) -> Tuple[str, str]:
 def get_document_names_from_folder(folder_path: str) -> List[str]:
     """Gets a list of supported document names from a folder."""
     if not os.path.isdir(folder_path):
+        st.error(f"Folder not found at path: {folder_path}") # Added for better debugging
         return []
     supported_files = []
     for file_name in os.listdir(folder_path):
@@ -114,9 +123,8 @@ def get_document_names_from_folder(folder_path: str) -> List[str]:
             supported_files.append(file_name)
     return supported_files
 
-def load_rules_file(folder_path: str, rules_filename: str) -> str:
-    """Loads the content of the rules file."""
-    rules_path = os.path.join(folder_path, rules_filename)
+def load_rules_file(rules_path: str) -> str:
+    """Loads the content of the rules file from a full path."""
     if os.path.exists(rules_path):
         _, content = read_file_content(rules_path)
         return content
@@ -327,19 +335,22 @@ def build_prompt(task_description: str, rules: str, context: str, question: Opti
 
 # --- Streamlit Main Application ---
 def main():
+    st.set_page_config(page_title="RegTech Assistance", page_icon="⚖️", layout="centered")
+    
     # --- ENHANCED DEBUGGING CODE ---
     st.subheader("🕵️‍♂️ File Reading Debug")
-    legal_docs_path = "./legal_docs"
-    if os.path.exists(legal_docs_path) and os.path.isdir(legal_docs_path):
-        files = os.listdir(legal_docs_path)
+    st.write(f"**Checking for folder at:** `{FOLDER_PATH}`") # Debug path
+    if os.path.exists(FOLDER_PATH) and os.path.isdir(FOLDER_PATH):
+        files = os.listdir(FOLDER_PATH)
         if not files:
-            st.warning("The `./legal_docs` folder exists, but it is empty.")
+            st.warning("The `legal_docs` folder exists, but it is empty.")
         else:
+            st.success(f"Found {len(files)} files in `legal_docs` folder.")
             first_file = files[0]
             st.info(f"Attempting to read the first file: `{first_file}`")
             try:
                 # We call your own function to see if it works
-                file_name, text_content = read_file_content(os.path.join(legal_docs_path, first_file))
+                file_name, text_content = read_file_content(os.path.join(FOLDER_PATH, first_file))
                 st.success(f"Successfully read `{file_name}`!")
                 st.text("First 500 chars:")
                 st.code(text_content[:500])
@@ -348,10 +359,10 @@ def main():
                 st.error(f"FAILED TO READ FILE. The error is:")
                 st.exception(e)
     else:
-        st.error("The `./legal_docs` folder was NOT FOUND.")
+        st.error("The `legal_docs` folder was NOT FOUND at the specified path.")
     st.markdown("---")
     # --- END OF DEBUGGING CODE ---
-    st.set_page_config(page_title="RegTech Assistance", page_icon="⚖️", layout="centered")
+
     if not LIBRARIES_AVAILABLE:
         st.stop()
     if not API_KEY or "sk-" not in API_KEY:
@@ -384,7 +395,8 @@ def main():
                 if not os.path.exists(SUMMARY_FOLDER_PATH): os.makedirs(SUMMARY_FOLDER_PATH)
 
                 st.session_state.doc_names = get_document_names_from_folder(FOLDER_PATH)
-                st.session_state.rules_content = load_rules_file(FOLDER_PATH, RULES_FILE_NAME)
+                # UPDATED: Load rules from the correct full path
+                st.session_state.rules_content = load_rules_file(RULES_FILE_PATH)
                 st.session_state.docs_loaded_first_time = True
                 st.toast(f"تم العثور على {len(st.session_state.doc_names)} وثيقة.", icon="✅")
 
@@ -403,6 +415,8 @@ def main():
                 type=['pdf', 'docx', 'txt', 'png', 'jpg', 'jpeg']
             )
             if uploaded_file is not None:
+                # This part will still fail on Streamlit Cloud due to read-only filesystem
+                # It's kept as per user request not to remove features
                 file_path = os.path.join(FOLDER_PATH, uploaded_file.name)
                 with open(file_path, "wb") as f:
                     f.write(uploaded_file.getbuffer())
