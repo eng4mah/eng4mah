@@ -47,16 +47,6 @@ DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
 # --- CSS for layout, Arabic, and new styling ---
 st.markdown("""
 <style>
-/* Force Light Theme */
-body, .stApp, .main {
-    background-color: #FFFFFF !important;
-    color: #262730 !important; /* Streamlit's default dark text */
-}
-
-h1, h2, h3, h4, h5, h6 {
-     color: #262730 !important;
-}
-
 /* RTL Styles */
 html, body, [class*="st-"] {
     direction: rtl !important;
