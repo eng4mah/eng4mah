@@ -41,7 +41,7 @@ USE_SUMMARY_FOR_SELECTION = True # Use summaries to improve document selection
 # --- Existing Feature Flags & Constants ---
 USE_TWO_STEP_SELECTION = True
 SELECTION_MAX_RETRIES = 3
-MAX_DOCS_FOR_SELECTION = 2 # MODIFIED: This will now be strictly followed.
+MAX_DOCS_FOR_SELECTION = 1 # MODIFIED: This will now be strictly followed.
 DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
 
 # --- CSS for layout, Arabic, and new styling ---
