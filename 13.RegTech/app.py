@@ -327,28 +327,29 @@ def build_prompt(task_description: str, rules: str, context: str, question: Opti
 
 # --- Streamlit Main Application ---
 def main():
-        # --- TEMPORARY DEBUGGING CODE ---
-    st.subheader("🕵️‍♂️ Directory Debug Information")
-    try:
-        # Get the current location of the script
-        cwd = os.getcwd()
-        st.write(f"**Current Working Directory:** `{cwd}`")
-
-        # List all files/folders in the root of the repository
-        st.write("**Files in Root Directory:**")
-        st.code('\n'.join(os.listdir(cwd)))
-
-        # Specifically check for the 'legal_docs' folder
-        legal_docs_path = os.path.join(cwd, "legal_docs")
-        if os.path.exists(legal_docs_path):
-            st.write("**Files in `./legal_docs`:**")
-            st.code('\n'.join(os.listdir(legal_docs_path)))
+    # --- ENHANCED DEBUGGING CODE ---
+    st.subheader("🕵️‍♂️ File Reading Debug")
+    legal_docs_path = "./legal_docs"
+    if os.path.exists(legal_docs_path) and os.path.isdir(legal_docs_path):
+        files = os.listdir(legal_docs_path)
+        if not files:
+            st.warning("The `./legal_docs` folder exists, but it is empty.")
         else:
-            st.error("The `./legal_docs` folder was NOT FOUND at the expected path.")
-            
-    except Exception as e:
-        st.error(f"An error occurred during debugging: {e}")
-    st.markdown("---") # Separator
+            first_file = files[0]
+            st.info(f"Attempting to read the first file: `{first_file}`")
+            try:
+                # We call your own function to see if it works
+                file_name, text_content = read_file_content(os.path.join(legal_docs_path, first_file))
+                st.success(f"Successfully read `{file_name}`!")
+                st.text("First 500 chars:")
+                st.code(text_content[:500])
+            except Exception as e:
+                # THIS WILL SHOW THE EXACT ERROR
+                st.error(f"FAILED TO READ FILE. The error is:")
+                st.exception(e)
+    else:
+        st.error("The `./legal_docs` folder was NOT FOUND.")
+    st.markdown("---")
     # --- END OF DEBUGGING CODE ---
     st.set_page_config(page_title="RegTech Assistance", page_icon="⚖️", layout="centered")
     if not LIBRARIES_AVAILABLE:
