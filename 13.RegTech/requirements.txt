@@ -1,20 +1,11 @@
-text
-# Core libraries (used by both load‑v1.py and app.py)
+txt
+streamlit
+cerebras-cloud-sdk
+tiktoken
 pypdf
 pdfminer.six
-pdfplumber
 PyMuPDF
 pdf2image
-pillow
 pytesseract
 python-docx
-cerebras-cloud-sdk
-toml
-
-# Streamlit (only needed for the web UI)
-streamlit
-
-# Optional – if you want LangChain utilities for downstream processing
-langchain
-pdfplumber
-python-poppler
+Pillow
