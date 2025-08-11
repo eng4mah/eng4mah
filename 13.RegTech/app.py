@@ -1,551 +1,494 @@
-from __future__ import annotations # MUST be the first import
-import streamlit as st
-import os
-import requests
-from typing import List, Dict, Generator, Optional, Union, Tuple
-import json
-import datetime
-import re
-import time
 
-# --- Library Imports ---
+# --------------------------------------------------------------
+# RegTech Assistance – Streamlit UI (مُحدَّث)
+# --------------------------------------------------------------
+
+import os
+import re
+from pathlib import Path
+from typing import List, Dict, Generator, Optional, Tuple
+
+import streamlit as st
+
+# --------------------------- Cerebras SDK ---------------------------
 try:
-    from langchain_core.documents import Document
+    from cerebras.cloud.sdk import Cerebras
+except ImportError:                                   # pragma: no cover
+    st.error("⚠️ يرجى تثبيت Cerebras SDK: `pip install cerebras-cloud-sdk`")
+    st.stop()
+
+# --------------------------- Optional tokeniser --------------------
+# tiktoken هو نفس المحلل الذي تستعمله نماذج OpenAI/Cerebras.
+# إذا لم يتوفر، نعود إلى حساب تقريبي (عدد الكلمات).
+try:
+    import tiktoken
+except Exception:
+    tiktoken = None
+
+def count_tokens(text: str) -> int:
+    """عدد الرموز بنفس طريقة Cerebras (مع fallback بسيط)."""
+    if not text:
+        return 0
+    if tiktoken:
+        try:
+            # نموذج gpt‑oss‑120b يستخدم نفس الترميز العام (cl100k_base)
+            enc = tiktoken.get_encoding("cl100k_base")
+            return len(enc.encode(text))
+        except Exception:
+            pass
+    # تقريب بسيط – كل كلمة ≈ 1.33 رمز (مقاربة للنماذج الكبيرة)
+    return int(len(text.split()) * 1.33)
+
+
+# --------------------------- PDF / DOCX / Image utilities ----------
+try:
     import pypdf
-    import docx
+except Exception:
+    pypdf = None
+
+try:
+    import pdfminer.high_level as pdfminer
+except Exception:
+    pdfminer = None
+
+try:
+    import fitz                     # PyMuPDF
+except Exception:
+    fitz = None
+
+try:
+    from pdf2image import convert_from_path
     from PIL import Image
     import pytesseract
-    LIBRARIES_AVAILABLE = True
-except ImportError as e:
-    st.error(f"مكتبة ناقصة: {e}")
-    LIBRARIES_AVAILABLE = False
+except Exception:
+    convert_from_path = None
+    Image = None
+    pytesseract = None
 
-# --- Configuration (FIXED PATHS) ---
-# Get the absolute path of the directory containing the script (e.g., /mount/src/eng4mah/13.RegTech.streamlits)
-script_directory = os.path.dirname(os.path.abspath(__file__))
-# Go up one directory to the project's root on Streamlit Cloud (e.g., /mount/src/eng4mah)
-project_root = os.path.dirname(script_directory)
-# Build the correct, absolute paths to your folders from the project root
-FOLDER_PATH = os.path.join(project_root, "13.RegTech", "legal_docs")
-SUMMARY_FOLDER_PATH = os.path.join(project_root, "13.RegTech", "summary")
-RULES_FILE_NAME = "RULES.txt"
-# Explicitly define the full path for the rules file
-RULES_FILE_PATH = os.path.join(project_root, "13.RegTech", RULES_FILE_NAME)
+try:
+    import docx
+except Exception:
+    docx = None
 
-API_KEY = "sk-cfbf269ccbbc4e94aa69df94c2a25739" # Replace with your actual key or use st.secrets
+# --------------------------- Paths & config -------------------------
+def get_repo_root() -> str:
+    return os.path.abspath(os.path.dirname(__file__))
 
-# --- New Feature Flags ---
-USE_AUTO_SUMMARIZATION = True # Master switch for the new summary feature
-USE_SUMMARY_FOR_SELECTION = True # Use summaries to improve document selection
 
-# --- Existing Feature Flags & Constants ---
+REPO_ROOT = get_repo_root()
+FOLDER_PATH = os.path.join(REPO_ROOT, "legal_docs")
+SUMMARY_FOLDER_PATH = os.path.join(REPO_ROOT, "summary")
+RULES_FILE_PATH = os.path.join(REPO_ROOT, "RULES.txt")
+
+API_KEY = os.getenv("CEREBRAS_API_KEY") or st.secrets.get("CEREBRAS_API_KEY", "")
+if not API_KEY:                                           # pragma: no cover
+    st.error("❗ مفتاح Cerebras غير مُعرَّف.")
+    st.stop()
+client = Cerebras(api_key=API_KEY)
+
+# --------------------------- Feature flags -------------------------
+USE_SUMMARY_FOR_SELECTION = True
 USE_TWO_STEP_SELECTION = True
-SELECTION_MAX_RETRIES = 3
-MAX_DOCS_FOR_SELECTION = 1 # MODIFIED: This will now be strictly followed.
-DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
+MAX_DOCS_FOR_SELECTION = 1
+SELECTION_RETRY_ATTEMPTS = 3
 
-# --- CSS for layout, Arabic, and new styling ---
-st.markdown("""
-<style>
-/* RTL Styles */
-html, body, [class*="st-"] {
-    direction: rtl !important;
-    text-align: right !important;
-}
-.st-emotion-cache-uf99v8 {
-    direction: rtl !important;
-    text-align: right !important;
-}
-/* The main chat input container is handled by Streamlit, we just add a border */
-.stChatInputContainer {
-    border-top: 2px solid #e0e0e0;
-}
-/* The footer container for our actions */
-.footer-actions {
-    padding: 1rem 1rem 0.5rem 1rem;
-    border-top: 1px solid #e0e0e0;
-    background-color: #f8f9fa;
-}
-hr {
-    border: 1px solid #cccccc; /* Thinner grey line */
-    margin: 0.6em 0;
-}
-.actions-header {
-    text-align: center;
-    font-weight: bold;
-    color: #4f4f4f; /* Darker grey for text */
-    font-size: 1.1em;
-    margin-bottom: 1em;
-    letter-spacing: 1px;
-}
-h1 { text-align: center; }
-</style>
-""", unsafe_allow_html=True)
+# --------------------------- Helpers -------------------------------
+def safe_run(fn):
+    """Decorator لالتقاط جميع الاستثناءات وعرضها في واجهة Streamlit."""
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:                         # pragma: no cover
+            st.error(f"❌ خطأ غير متوقع: {exc}")
+            st.exception(exc)
+    return wrapper
 
-# --- Helper Functions (Includes New and Modified Functions) ---
+
+# ---------- PDF cascade ----------
+def _extract_pdf_with_pypdf(path: str) -> str:
+    if not pypdf:
+        return ""
+    try:
+        with open(path, "rb") as f:
+            reader = pypdf.PdfReader(f)
+            return "".join(page.extract_text() or "" for page in reader.pages)
+    except Exception:
+        return ""
+
+
+def _extract_pdf_with_pdfminer(path: str) -> str:
+    if not pdfminer:
+        return ""
+    try:
+        return pdfminer.extract_text(path) or ""
+    except Exception:
+        return ""
+
+
+def _extract_pdf_with_fitx(path: str) -> str:
+    if not fitz:
+        return ""
+    try:
+        doc = fitz.open(path)
+        return "".join(page.get_text() for page in doc)
+    except Exception:
+        return ""
+
+
+def _ocr_pdf(path: str) -> str:
+    if not (convert_from_path and pytesseract and Image):
+        return ""
+    try:
+        images = convert_from_path(path, dpi=300, fmt="png")
+        txt = ""
+        for img in images:
+            if not isinstance(img, Image.Image):
+                img = Image.open(img)
+            txt += pytesseract.image_to_string(img) + "\n"
+        return txt
+    except Exception:
+        return ""
+
+
+def _read_docx(path: str) -> str:
+    if not docx:
+        return ""
+    try:
+        d = docx.Document(path)
+        return "\n".join(p.text for p in d.paragraphs)
+    except Exception:
+        return ""
+
+
+def _read_image(path: str) -> str:
+    if not (pytesseract and Image):
+        return ""
+    try:
+        return pytesseract.image_to_string(Image.open(path))
+    except Exception:
+        return ""
+
 
 def read_file_content(file_path: str) -> Tuple[str, str]:
-    """Reads content from various file types."""
-    text = ""
+    """
+    إرجاع (اسم‑الملف, النص المستخرج) لأي صيغة مدعومة.
+    PDFs → cascade، DOCX → python‑docx، صور → OCR، غير ذلك → نص عادي.
+    """
     file_name = os.path.basename(file_path)
-    try:
-        with open(file_path, 'rb') as f:
-            if file_name.endswith(".pdf"):
-                reader = pypdf.PdfReader(f)
-                for page in reader.pages:
-                    text += page.extract_text() or ""
-            elif file_name.endswith(".docx"):
-                doc = docx.Document(f)
-                for para in doc.paragraphs:
-                    text += para.text + "\n"
-            elif file_name.endswith(".txt"):
-                # Re-open with correct mode and encoding for text files
-                with open(file_path, 'r', encoding='utf-8') as text_f:
-                    text = text_f.read()
-            elif file_name.lower().endswith(('.png', '.jpg', '.jpeg')):
-                try:
-                    text = pytesseract.image_to_string(Image.open(f))
-                except pytesseract.TesseractNotFoundError:
-                    st.error("مطلوب تثبيت Tesseract.")
-                except Exception as ocr_e:
-                    st.error(f"فشل قراءة الصورة {file_name}: {ocr_e}")
-    except Exception as e:
-        st.error(f"خطأ قراءة الملف {file_name}: {e}")
+    text = ""
+
+    if file_name.lower().endswith(".pdf"):
+        text = _extract_pdf_with_pypdf(file_path)
+        if not text.strip():
+            text = _extract_pdf_with_pdfminer(file_path)
+        if not text.strip():
+            text = _extract_pdf_with_fitx(file_path)
+        if not text.strip():
+            text = _ocr_pdf(file_path)
+
+    elif file_name.lower().endswith(".docx"):
+        text = _read_docx(file_path)
+
+    elif file_name.lower().endswith(('.png', '.jpg', '.jpeg')):
+        text = _read_image(file_path)
+
+    else:   # نص عادي
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                text = f.read()
+        except Exception:
+            pass
+
+    if not text.strip():
+        st.warning(f"⚠️ لا يوجد محتوى مقروء في `{file_name}`.")
     return file_name, text
 
-def get_document_names_from_folder(folder_path: str) -> List[str]:
-    """Gets a list of supported document names from a folder."""
-    if not os.path.isdir(folder_path):
-        # This error is useful for initial setup, but can be removed later.
-        # st.error(f"Folder not found at path: {folder_path}")
-        return []
-    supported_files = []
-    for file_name in os.listdir(folder_path):
-        if file_name != RULES_FILE_NAME and file_name.lower().endswith(('.pdf', '.docx', '.txt', '.png', '.jpg', '.jpeg')):
-            supported_files.append(file_name)
-    return supported_files
 
-def load_rules_file(rules_path: str) -> str:
-    """Loads the content of the rules file from a full path."""
-    if os.path.exists(rules_path):
-        _, content = read_file_content(rules_path)
-        return content
+def get_document_names_from_folder() -> List[str]:
+    if not os.path.isdir(FOLDER_PATH):
+        st.warning(f"⚠️ المجلد غير موجود: {FOLDER_PATH}")
+        return []
+    return [
+        f for f in os.listdir(FOLDER_PATH)
+        if f.lower().endswith((".pdf", ".docx", ".txt", ".png", ".jpg", ".jpeg"))
+    ]
+
+
+def load_rules_file() -> str:
+    if os.path.exists(RULES_FILE_PATH):
+        _, txt = read_file_content(RULES_FILE_PATH)
+        return txt
     return "لا توجد تعليمات خاصة. اتبع التعليمات العامة."
 
-def get_deepseek_response_blocking(prompt: str, api_key: str) -> Optional[str]:
-    """Gets a single, non-streaming response from the API."""
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}",
-    }
-    payload = {
-        "model": "deepseek-chat",
-        "messages": [{"role": "user", "content": prompt}],
-        "stream": False
-    }
-    try:
-        response = requests.post(DEEPSEEK_API_URL, headers=headers, json=payload, timeout=90)
-        response.raise_for_status()
-        response_data = response.json()
-        return response_data['choices'][0]['message']['content']
-    except requests.exceptions.RequestException as e:
-        st.error(f"فشل الاتصال بالـ API أثناء طلب الاستجابة: {e}")
-        return None
-    except Exception as e:
-        st.error(f"خطأ غير متوقع أثناء طلب الاستجابة: {e}")
-        return None
 
-def generate_and_save_summary(file_name: str, doc_folder: str, summary_folder: str, api_key: str):
-    """Generates and saves a summary for a document if it doesn't exist."""
-    summary_file_name = f"{os.path.splitext(file_name)[0]}_summary.txt"
-    summary_file_path = os.path.join(summary_folder, summary_file_name)
-
-    if os.path.exists(summary_file_path):
-        return # Summary already exists
-
-    st.info(f"لم يتم العثور على ملخص لـ `{file_name}`. سيتم إنشاؤه الآن...")
-    original_file_path = os.path.join(doc_folder, file_name)
-    _, file_content = read_file_content(original_file_path)
-
-    if not file_content:
-        st.warning(f"الملف `{file_name}` فارغ أو لا يمكن قراءته. تم تخطي إنشاء الملخص.")
-        return
-
-    summary_prompt = f"""
-مهمتك هي إنشاء ملخص موجز للمستند التالي.
-اكتب الملخص كفقرة واحدة متصلة. لا تستخدم نقاط أو قوائم.
-يجب أن يصف الملخص محتويات المستند بشكل مباشر، على سبيل المثال: "يحتوي هذا المستند على قواعد بخصوص أ، ب، ج، والتي تستخدم في س، ص، ع. وتوجد هنا معلومات تفصيلية حول..."
-لا تضف أي مقدمات أو خواتيم مثل "إليك الملخص" أو "آمل أن يكون هذا مفيدًا". قدم الملخص فقط.
-
-المستند المراد تلخيصه:
----
-{file_content}
----
-الملخص:
-"""
-    with st.spinner(f"جاري توليد الملخص لـ `{file_name}`..."):
-        summary_text = get_deepseek_response_blocking(summary_prompt, api_key)
-
-    if summary_text:
-        try:
-            os.makedirs(summary_folder, exist_ok=True)
-            full_summary_content = f"ملخص ملف: {file_name}\n\n{summary_text}"
-            with open(summary_file_path, 'w', encoding='utf-8') as f:
-                f.write(full_summary_content)
-            st.toast(f"تم إنشاء وحفظ ملخص لـ `{file_name}`.", icon="📝")
-        except Exception as e:
-            st.error(f"فشل حفظ الملخص لـ `{file_name}`: {e}")
-    else:
-        st.error(f"فشل توليد الملخص من الـ API لـ `{file_name}`.")
-
-def load_all_summaries(summary_folder: str) -> str:
-    """Loads all summaries from the summary folder into a single string."""
-    all_summaries_text = ""
-    if not os.path.isdir(summary_folder):
+def load_all_summaries() -> str:
+    if not os.path.isdir(SUMMARY_FOLDER_PATH):
         return "لا توجد ملخصات متاحة."
+    out = ""
+    for fname in sorted(os.listdir(SUMMARY_FOLDER_PATH)):
+        if fname.lower().endswith(".txt"):
+            _, txt = read_file_content(os.path.join(SUMMARY_FOLDER_PATH, fname))
+            out += f"---\n{txt}\n---\n\n"
+    return out or "لم يُعثر على ملخصات."
 
-    summary_files = [f for f in os.listdir(summary_folder) if f.endswith('.txt')]
-    for file_name in summary_files:
-        _, content = read_file_content(os.path.join(summary_folder, file_name))
-        all_summaries_text += f"---\n{content}\n---\n\n"
 
-    return all_summaries_text if all_summaries_text else "لم يتم العثور على ملخصات."
+def get_document_selection_with_summaries(
+    question: str,
+    doc_names: List[str],
+    rules: str,
+    summaries: str,
+    max_docs: int,
+) -> Optional[List[int]]:
+    doc_list = "\n".join([f"#{i}: {n}" for i, n in enumerate(doc_names)])
 
-def get_document_selection_with_summaries(question: str, doc_names: List[str], rules: str, summaries: str, api_key: str, max_docs: int) -> Optional[List[int]]:
-    """MODIFIED: Selects documents based on rules, summaries, and the user question, respecting max_docs."""
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
-    doc_list_str = "\n".join([f"#{i}: {name}" for i, name in enumerate(doc_names)])
-
-    # MODIFIED: Prompt now dynamically includes the max number of documents.
-    selection_prompt = f"""
-مهمتك هي تحديد أنسب الملفات للإجابة على سؤال المستخدم، بحد أقصى {max_docs} ملف.
-اعتمد في اختيارك على القواعد الإلزامية وملخصات الملفات وسؤال المستخدم.
-ردك يجب أن يحتوي فقط على أرقام الملفات المختارة بالصيغة: `#N, #M`.
-إذا لم يكن أي ملف مناسبًا على الإطلاق، اكتب `#NONE`. لا تضف أي نص آخر.
+    user_prompt = f"""
+مهمتك هي اختيار الأنسب من المستندات للإجابة على سؤال المستخدم، بحد أقصى {max_docs} ملف.
+استخدم القواعد والملخصات.
 
 سؤال المستخدم:
----
 {question}
----
 
 القواعد الإلزامية:
----
 {rules}
----
 
-ملخصات الملفات (استخدمها لتحديد الملفات الأنسب):
----
+ملخصات الملفات:
 {summaries}
----
 
-الملفات المتوفرة (اختر بحد أقصى {max_docs} من هنا):
----
-{doc_list_str}
----
+قائمة الملفات المتاحة:
+{doc_list}
 
-الرد المطلوب (أرقام الملفات أو #NONE):
-"""
-    payload = {"model": "deepseek-chat", "messages": [{"role": "user", "content": selection_prompt}], "stream": False}
+أرسل أرقام الملفات المختارة بصيغة #N أو #NONE إذا لا شيء مناسب.
+""".strip()
 
-    for attempt in range(SELECTION_MAX_RETRIES):
+    for attempt in range(SELECTION_RETRY_ATTEMPTS):
         try:
-            response = requests.post(DEEPSEEK_API_URL, headers=headers, json=payload, timeout=45)
-            if response.status_code == 400:
-                st.error(f"خطأ في طلب API (400). التفاصيل: {response.text}")
-                return None
-            response.raise_for_status()
-            response_data = response.json()
-            content = response_data['choices'][0]['message']['content']
-            indices_found = re.findall(r'#(\d+)', content)
-            
-            # MODIFIED: Enforce returning up to max_docs indices.
-            if indices_found:
-                valid_indices = [int(i) for i in indices_found if 0 <= int(i) < len(doc_names)]
-                return valid_indices[:max_docs]
-            elif "#NONE" in content.upper():
+            resp = client.chat.completions.create(
+                messages=[{"role": "user", "content": user_prompt}],
+                model="gpt-oss-120b",
+            )
+            content = resp.choices[0].message.content or ""
+            nums = re.findall(r"#(\d+)", content)
+
+            if nums:
+                indices = [int(x) for x in nums if 0 <= int(x) < len(doc_names)]
+                if indices:
+                    return indices[:max_docs]
+
+            if "#NONE" in content.upper():
                 return []
-            
-            st.warning(f"رد الذكاء الاصطناعي غير صحيح. إعادة المحاولة... ({attempt+1}/{SELECTION_MAX_RETRIES})")
-            time.sleep(1)
-        except Exception as e:
-            st.error(f"فشل اختيار الوثائق من الذكاء الاصطناعي: {e}")
-            return None
-    st.error("فشل اختيار الوثائق بعد عدة محاولات.")
+        except Exception as e:                     # pragma: no cover
+            st.error(f"❌ محاولة اختيار الوثائق فشلت ({attempt+1}/{SELECTION_RETRY_ATTEMPTS}): {e}")
+            continue
     return None
 
-def get_deepseek_response_stream(prompt: str, api_key: str, chat_history: List[Dict[str, str]], context_doc_count: int) -> Generator[str, None, None]:
-    """Gets a streaming response from the API."""
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
-    messages = chat_history + [{"role": "user", "content": prompt}]
-    payload = {"model": "deepseek-chat", "messages": messages, "stream": True}
-    try:
-        response = requests.post(DEEPSEEK_API_URL, headers=headers, json=payload, stream=True, timeout=60)
-        response.raise_for_status()
-        for chunk in response.iter_lines():
-            if chunk:
-                decoded_chunk = chunk.decode('utf-8')
-                if decoded_chunk.startswith('data: '):
-                    try:
-                        if decoded_chunk[6:].strip() == '[DONE]':
-                            continue
-                        json_data = json.loads(decoded_chunk[6:])
-                        if 'choices' in json_data and json_data['choices']:
-                            content = json_data['choices'][0].get('delta', {}).get('content', '')
-                            if content:
-                                yield content
-                    except json.JSONDecodeError:
-                        continue
-    except requests.exceptions.HTTPError as e:
-        error_message = f"**فشل الاتصال بالـ API برمز {e.response.status_code}.**"
-        if e.response.status_code == 400:
-            error_message += f"\n\nقد يكون المستند المختار (**{context_doc_count}**) طويلاً جداً بالنسبة للـ API."
-        else:
-            error_message += f"\n\n**السبب:** {e.response.reason}\n**التفاصيل:**\n```\n{e.response.text}\n```"
-        st.error(error_message)
-        yield error_message
-    except requests.exceptions.RequestException as e:
-        error_message = f"فشل الاتصال بالإنترنت: {e}"
-        st.error(error_message)
-        yield error_message
-    except Exception as e:
-        error_message = f"حدث خطأ غير متوقع: {e}"
-        st.error(error_message)
-        yield error_message
 
-def build_prompt(task_description: str, rules: str, context: str, question: Optional[str] = None) -> str:
-    """Builds the final prompt for the LLM."""
-    question_section = f"\nسؤال المستخدم:\n---\n{question}\n---\n" if question else ""
-    return f"""
-أنت مساعد قانوني متخصص "RegTech Assistance". يجب عليك اتباع التعليمات التالية بدقة:
+def get_cerebras_response_stream(prompt: str, chat_history: List[Dict[str, str]]) -> Generator[str, None, None]:
+    messages = chat_history + [{"role": "user", "content": prompt}]
+    try:
+        stream = client.chat.completions.create(
+            messages=messages,
+            model="gpt-oss-120b",
+            stream=True,
+        )
+        for chunk in stream:
+            if chunk.choices[0].delta.content:
+                yield chunk.choices[0].delta.content
+    except Exception as e:                         # pragma: no cover
+        err = f"❌ خطأ في الاتصال بالـ API: {e}"
+        st.error(err)
+        yield err
+
+
+def build_prompt(task: str, rules: str, context: str, question: Optional[str] = None) -> str:
+    q_sec = f"\nسؤال المستخدم:\n---\n{question}\n---\n" if question else ""
+    return f"""أنت مساعد قانوني متخصص "RegTech Assistance". اتبع التعليمات بدقة:
 
 قواعد ملزمة:
----
 {rules}
----
 
-المهمة: {task_description}
-اعتمد فقط على الوثائق المقدمة. لا تستخدم معلومات خارجية.
-إذا لم تجد المعلومة، صرّح بذلك.
-يجب ذكر مصدر كل معلومة.
+المهمة:
+{task}
 
 الوثائق:
----
 {context if context else "لم يتم اختيار أو العثور على وثائق."}
----
-{question_section}
+{q_sec}
 """
 
-# --- Streamlit Main Application ---
+
+# ------------------------------------------------------------------
+# 7️⃣  واجهة Streamlit
+# ------------------------------------------------------------------
+@safe_run
 def main():
-    # Page config must be the first Streamlit command.
     st.set_page_config(page_title="RegTech Assistance", page_icon="⚖️", layout="centered")
-    
-    if not LIBRARIES_AVAILABLE:
-        st.stop()
-    if not API_KEY or "sk-" not in API_KEY:
-        st.error("لم يتم ضبط مفتاح DeepSeek API بشكل صحيح.")
-        st.stop()
 
-    # --- Session state Initialization ---
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-    if "doc_names" not in st.session_state:
-        st.session_state.doc_names = []
-    if "rules_content" not in st.session_state:
-        st.session_state.rules_content = ""
-    if "docs_loaded_first_time" not in st.session_state:
-        st.session_state.docs_loaded_first_time = False
-    if "action" not in st.session_state:
-        st.session_state.action = None
+    # ----------------- CSS عام -----------------
+    st.markdown(
+        """
+        <style>
+        body { direction: rtl; text-align: right; }
+        input, textarea { text-align: right !important; }
+        .stChatMessage, .stChatMessage > div { opacity: 1 !important; }
 
-    # --- 1. Title Part ---
-    st.title("RegTech Assistance")
-    st.markdown("<hr />", unsafe_allow_html=True)
+        /* زر المسح الثابت – أسفل‑يسار */
+        .clear-btn {
+            position: fixed;
+            bottom: 12px;
+            left: 12px;
+            z-index: 9999;
+            background: none;
+            border: none;
+            font-size: 1.8rem;
+            cursor: pointer;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    # --- 2. Chat Part ---
-    chat_container = st.container()
-    with chat_container:
-        # --- Initial Loading and Auto-Summarization ---
-        if not st.session_state.docs_loaded_first_time:
-            with st.spinner("جاري تحميل قائمة الوثائق والقواعد..."):
-                # The logic to create folders will fail on read-only filesystems,
-                # but it's harmless if the folders already exist in the repo.
-                if not os.path.exists(FOLDER_PATH): os.makedirs(FOLDER_PATH, exist_ok=True)
-                if not os.path.exists(SUMMARY_FOLDER_PATH): os.makedirs(SUMMARY_FOLDER_PATH, exist_ok=True)
+    # ----------------- زر المسح الثابت -----------------
+    # يجرى إعادة تحميل الصفحة => مسح كل الـ session state
+    st.markdown(
+        """
+        <button class="clear-btn" title="مسح المحادثة"
+                onclick="window.location.reload();">🧹</button>
+        """,
+        unsafe_allow_html=True,
+    )
 
-                st.session_state.doc_names = get_document_names_from_folder(FOLDER_PATH)
-                # UPDATED: Load rules from the correct full path
-                st.session_state.rules_content = load_rules_file(RULES_FILE_PATH)
-                st.session_state.docs_loaded_first_time = True
-                st.toast(f"تم العثور على {len(st.session_state.doc_names)} وثيقة.", icon="✅")
+    # ----------------- Session State -----------------
+    for key, default in {
+        "messages": [],
+        "doc_names": [],
+        "rules_content": "",
+        "docs_loaded_first_time": False,
+    }.items():
+        if key not in st.session_state:
+            st.session_state[key] = default
 
-            if USE_AUTO_SUMMARIZATION and st.session_state.doc_names:
-                st.write("جاري التحقق من الملخصات وإنشاء الناقص منها...")
-                summary_progress = st.progress(0)
-                for i, doc_name in enumerate(st.session_state.doc_names):
-                    generate_and_save_summary(doc_name, FOLDER_PATH, SUMMARY_FOLDER_PATH, API_KEY)
-                    summary_progress.progress((i + 1) / len(st.session_state.doc_names))
-                summary_progress.empty()
+    # ----------------- أول تحميل للملفات/المجلد -----------------
+    if not st.session_state.docs_loaded_first_time:
+        with st.spinner("جاري تهيئة النظام…"):
+            os.makedirs(FOLDER_PATH, exist_ok=True)
+            os.makedirs(SUMMARY_FOLDER_PATH, exist_ok=True)
 
-        # --- Action UI: Uploader ---
-        if st.session_state.action == "upload_doc":
-            uploaded_file = st.file_uploader(
-                "اختر ملفًا لتحميله إلى قاعدة المعرفة",
-                type=['pdf', 'docx', 'txt', 'png', 'jpg', 'jpeg']
-            )
-            if uploaded_file is not None:
-                # This part will still fail on Streamlit Cloud due to read-only filesystem
-                # It's kept as per user request not to remove features
-                file_path = os.path.join(FOLDER_PATH, uploaded_file.name)
-                try:
-                    with open(file_path, "wb") as f:
-                        f.write(uploaded_file.getbuffer())
-                    st.toast(f"تم تحميل الملف '{uploaded_file.name}' بنجاح!", icon="✅")
+            if not os.path.exists(RULES_FILE_PATH):
+                with open(RULES_FILE_PATH, "w", encoding="utf-8") as f:
+                    f.write("لا توجد تعليمات خاصة. اتبع التعليمات العامة.")
 
-                    if USE_AUTO_SUMMARIZATION:
-                        generate_and_save_summary(uploaded_file.name, FOLDER_PATH, SUMMARY_FOLDER_PATH, API_KEY)
-                except Exception as e:
-                    st.error(f"فشل تحميل الملف. الخادم يعمل في وضع القراءة فقط: {e}")
+            st.session_state.doc_names = get_document_names_from_folder()
+            st.session_state.rules_content = load_rules_file()
+            st.session_state.docs_loaded_first_time = True
+            st.toast(f"✅ عُثر على {len(st.session_state.doc_names)} وثيقة.", icon="✅")
 
-
-                st.session_state.docs_loaded_first_time = False
-                st.session_state.action = None
-                st.rerun()
-
-        # --- Action UI: Summarizer ---
-        if st.session_state.action == "summarize_doc":
-            if st.session_state.doc_names:
-                selected_file = st.selectbox("اختر ملفًا لتلخيصه:", options=st.session_state.doc_names, index=None, placeholder="اختر ملف...")
-                if selected_file:
-                    st.session_state.messages.append({"role": "user", "content": f"لخص لي الملف: `{selected_file}`"})
-                    st.session_state.action = "processing_summary"
-                    st.session_state.summarize_file = selected_file
-                    st.rerun()
+    # ----------------- عرض السجل -----------------
+    if not st.session_state.messages:
+        st.markdown(
+            "<div style='color:#a0a0a0; text-align:right'>مرحباً! كيف يمكنني مساعدتك في وثائقك اليوم؟ ⚖️</div>",
+            unsafe_allow_html=True,
+        )
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            if msg.get("is_review_notice"):
+                st.info(msg["content"])
             else:
-                st.warning("لا توجد وثائق متاحة للتلخيص. يرجى تحميل وثيقة أولاً.")
-                st.session_state.action = None
+                st.markdown(msg["content"])
 
-        # --- Chat display ---
-        if not st.session_state.messages:
-            st.markdown("<div style='text-align: center; color: #a0a0a0;'>مرحباً، كيف أساعدك في مستنداتك اليوم؟ ⚖️</div>", unsafe_allow_html=True)
-        for message in st.session_state.messages:
-            with st.chat_message(message["role"]):
-                if message.get("is_review_notice"):
-                    st.info(message["content"])
+    # ----------------- إدخال المستخدم -----------------
+    if prompt := st.chat_input("اسأل سؤالاً عن مستنداتك …"):
+        # حفظ سؤال المستخدم
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        # ------------ المساعد ------------
+        with st.chat_message("assistant"):
+            final_context = ""
+            context_docs = []
+
+            # ----- اختيار الوثائق إذا كان مفعلاً -----
+            if USE_TWO_STEP_SELECTION and st.session_state.doc_names:
+                with st.spinner("تحليل السؤال واختيار الوثائق…"):
+                    all_summaries = load_all_summaries()
+                    selected_idxs = get_document_selection_with_summaries(
+                        prompt,
+                        st.session_state.doc_names,
+                        st.session_state.rules_content,
+                        all_summaries,
+                        MAX_DOCS_FOR_SELECTION,
+                    )
+
+                if selected_idxs is None:
+                    err = "❌ فشل اختيار الوثيقة بعد عدة محاولات. رجاءً أعد المحاولة."
+                    st.error(err)
+                    st.session_state.messages.append({"role": "assistant", "content": err})
+                    st.rerun()
+                elif not selected_idxs:
+                    st.info("⚙️ لم تُحدَّد وثائق صالحة – سيُستند الرد إلى القواعد فقط.")
                 else:
-                    st.markdown(message["content"])
+                    chosen = [
+                        st.session_state.doc_names[i]
+                        for i in selected_idxs
+                        if 0 <= i < len(st.session_state.doc_names)
+                    ]
+                    notice = "سأراجِع الوثائق التالية:\n\n" + "\n".join(f"- `{n}`" for n in chosen)
+                    st.info(notice)
+                    st.session_state.messages.append(
+                        {"role": "assistant", "content": notice, "is_review_notice": True}
+                    )
+                    with st.spinner("تحميل محتوى الوثائق…"):
+                        for n in chosen:
+                            _, txt = read_file_content(os.path.join(FOLDER_PATH, n))
+                            if txt:
+                                context_docs.append({"source": n, "content": txt})
+                    final_context = "\n\n---\n\n".join(
+                        f"المصدر: {d['source']}\n\nالمحتوى: {d['content']}"
+                        for d in context_docs
+                    )
+            else:
+                st.info("⚙️ اختيار الوثائق معطل – سيتم الاعتماد على القواعد فقط.")
 
-        # --- Response Generation Logic ---
-        if st.session_state.action == "processing_summary":
-            with st.chat_message("assistant"):
-                selected_file = st.session_state.summarize_file
-                with st.spinner(f"جاري تلخيص الملف '{selected_file}'..."):
-                    file_path = os.path.join(FOLDER_PATH, selected_file)
-                    _, text = read_file_content(file_path)
-                    if text:
-                        task = "لخص الوثيقة التالية بدقة واذكر النقاط الرئيسية."
-                        context = f"المصدر: {selected_file}\n\nالمحتوى: {text}"
-                        summary_prompt = build_prompt(task, st.session_state.rules_content, context)
-                        response_placeholder = st.empty()
-                        full_response = ""
-                        stream_generator = get_deepseek_response_stream(summary_prompt, API_KEY, [], 1)
-                        for chunk in stream_generator:
-                            full_response += chunk
-                            response_placeholder.markdown(full_response + "▌")
-                        response_placeholder.markdown(full_response)
-                        if full_response:
-                            st.session_state.messages.append({"role": "assistant", "content": full_response})
-                    else:
-                        error_msg = f"لم أتمكن من قراءة محتوى الملف: {selected_file}"
-                        st.error(error_msg)
-                        st.session_state.messages.append({"role": "assistant", "content": error_msg})
-            st.session_state.action = None
-            st.session_state.summarize_file = None
-            time.sleep(0.1)
-            st.rerun()
+            # ----- توليد الرد -----
+            with st.spinner("توليد الرد…"):
+                task = "أجب على سؤال المستخدم بالاعتماد على الوثائق فقط."
+                full_prompt = build_prompt(task, st.session_state.rules_content, final_context, prompt)
 
-        if prompt := st.chat_input("اسأل سؤالاً عن مستنداتك...", disabled=(st.session_state.action is not None)):
-            st.session_state.messages.append({"role": "user", "content": prompt})
-            with st.chat_message("assistant"):
-                final_context_text = ""
-                context_docs_content = []
+                # تحضير التاريخ (بدون رسائل “notice”)
+                history_for_api = [
+                    {"role": m["role"], "content": m["content"]}
+                    for m in st.session_state.messages[:-1]   # باستثناء سؤال المستخدم الأخير
+                    if not m.get("is_review_notice")
+                ]
 
-                if USE_TWO_STEP_SELECTION and st.session_state.doc_names:
-                    with st.spinner("جاري تحليل سؤالك وتحديد الوثائق المناسبة..."):
-                        all_summaries = load_all_summaries(SUMMARY_FOLDER_PATH)
-                        # MODIFIED: Pass MAX_DOCS_FOR_SELECTION to the function
-                        selected_indices = get_document_selection_with_summaries(
-                            prompt, st.session_state.doc_names, st.session_state.rules_content, all_summaries, API_KEY, MAX_DOCS_FOR_SELECTION
-                        )
+                placeholder = st.empty()
+                answer = ""
 
-                    if selected_indices is None:
-                        error_msg = "حدث خطأ أثناء اختيار الوثائق. يرجى إعادة المحاولة."
-                        st.error(error_msg)
-                        st.session_state.messages.append({"role": "assistant", "content": error_msg})
-                        st.rerun()
-                    
-                    elif not selected_indices:
-                        st.info("لم يتم تحديد وثائق ذات صلة. سأجيب بناءً على القواعد العامة فقط.")
-                        final_context_text = ""
-                    
-                    else:
-                        selected_names = [st.session_state.doc_names[i] for i in selected_indices if 0 <= i < len(st.session_state.doc_names)]
-                        review_notice = "سأراجع الملفات التالية للإجابة على سؤالك:\n\n" + "\n".join([f"- `{name}`" for name in selected_names])
-                        st.info(review_notice)
-                        st.session_state.messages.append({"role": "assistant", "content": review_notice, "is_review_notice": True})
-                        
-                        with st.spinner("جاري تحميل محتوى الملفات المختارة..."):
-                            for name in selected_names:
-                                file_path = os.path.join(FOLDER_PATH, name)
-                                _, text = read_file_content(file_path)
-                                if text:
-                                    context_docs_content.append(Document(page_content=text, metadata={"source": name}))
-                            final_context_text = "\n\n---\n\n".join([f"المصدر: {doc.metadata['source']}\n\nالمحتوى: {doc.page_content}" for doc in context_docs_content])
-                else:
-                    st.info("لم يتم تفعيل اختيار الوثائق أو لا توجد وثائق. سأجيب بناءً على القواعد العامة.")
-                    final_context_text = ""
+                for chunk in get_cerebras_response_stream(full_prompt, history_for_api):
+                    answer += chunk
+                    placeholder.markdown(answer + "▌")
 
-                with st.spinner("جاري توليد الرد..."):
-                    task = "أجب عن سؤال المستخدم بناءً على الوثائق فقط."
-                    final_prompt = build_prompt(task, st.session_state.rules_content, final_context_text, prompt)
-                    response_placeholder = st.empty()
-                    full_response = ""
-                    chat_history_for_api = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages[:-1] if not m.get("is_review_notice")]
-                    
-                    stream_generator = get_deepseek_response_stream(final_prompt, API_KEY, chat_history_for_api, len(context_docs_content))
-                    for chunk in stream_generator:
-                        full_response += chunk
-                        response_placeholder.markdown(full_response + "▌")
-                    response_placeholder.markdown(full_response)
-                
-                if full_response:
-                    st.session_state.messages.append({"role": "assistant", "content": full_response})
-                time.sleep(0.1)
-                st.rerun()
+                # عدد الرموز (حسب محلل Cerebras أو تقريبي)
+                token_cnt = count_tokens(answer)
+                answer_with_tokens = f"{answer} ({token_cnt}t)"
+                placeholder.markdown(answer_with_tokens)
 
+                # حفظ الرد في السجل
+                if answer:
+                    st.session_state.messages.append(
+                        {"role": "assistant", "content": answer_with_tokens}
+                    )
 
-    # --- 3. Footer with Quick Actions ---
-    with st.container():
-        st.markdown('<div class="footer-actions">', unsafe_allow_html=True)
-        st.markdown("<div class='actions-header'>الإجراءات السريعة</div>", unsafe_allow_html=True)
-        action_cols = st.columns(3)
+            # ----- تمرير الصفحة إلى الأسفل تلقائيًا -----
+            st.markdown(
+                """
+                <script>
+                const el = window.parent.document.querySelector('.stApp');
+                if (el) { el.scrollTo({top: el.scrollHeight, behavior: 'smooth'}); }
+                </script>
+                """,
+                unsafe_allow_html=True,
+            )
 
-        if action_cols[0].button("📂 تحميل", use_container_width=True):
-            st.session_state.action = "upload_doc"
-            st.rerun()
-
-        if action_cols[1].button("📄 تلخيص", use_container_width=True):
-            st.session_state.action = "summarize_doc"
-            st.rerun()
-
-        if action_cols[2].button("🧹 مسح", use_container_width=True):
-            st.session_state.messages = []
-            st.session_state.action = None
-            st.toast("تم مسح المحادثة", icon="🗑️")
-            st.rerun()
-
-        st.markdown('</div>', unsafe_allow_html=True)
-
-
+# ----------------------------------------------------------------------
 if __name__ == "__main__":
     main()
