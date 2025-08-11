@@ -351,7 +351,7 @@ def main():
     st.markdown(
         """
         <button class="clear-btn" title="مسح المحادثة"
-                onclick="window.location.reload();">🧹</button>
+                onclick="window.location.reload();"></button>
         """,
         unsafe_allow_html=True,
     )
